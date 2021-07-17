@@ -1,36 +1,49 @@
 ################################################################################
-#                              Configurazione                                  #
+#                                 SPRINKLER                                    #
 #Pinout: https://circuits4you.com/wp-content/uploads/2018/12/ESP32-Pinout.jpg  #
+#Solenoid: Bistable 9v
 #                                                                              #
 ################################################################################
 
 substitutions:
-  green_button: GPIO12
+  green_button: GPIO14
   red_button: GPIO13
   pin_sprinkler_on: GPIO23
   pin_sprinkler_off: GPIO22
-  battery_acquisition: GPIO35
+  battery_acquisition: GPIO39
   battery_acquisition_switch: GPIO25
-  
+  moisture_acquisition_switch: GPIO15
+  default_deep_sleep_duration: 1min
+  default_run_duration: 120min
+
+globals:
+ - id: default_irrigation_time #Used instead of irrigation_time when it result not a number. To optimize the code size could be embedded directly in the conditional check check
+   type: double
+   restore_value: no
+   initial_value: '10'
+
 esphome:
   name: irrigatore
   platform: ESP32
   board: esp-wrover-kit
-  
+#Custom component. to erase in the final version
+#  includes:
+#   - heapmon.h  
+#  board_flash_mode: qio
+
   on_boot:
     priority: -100
     then:
-      - logger.log: "Hello word!"
-
+      - logger.log: "Hello word!" #Just to test the on boot feature - I would perform on boot the battery voltage check prior to open the solenoid
+      
 ###############################################################
-#              GESTIONE WIFI OTA ED IP                        #   
+#             WIFI - OTA and static IP  management            #   
 ###############################################################
 wifi:
   networks:
   - ssid: xxx
     password: xxx
-  - ssid: xxx
-    password: xxx
+
 
 
 # Static IP
@@ -39,30 +52,37 @@ wifi:
     gateway: 192.168.1.1
     subnet: 255.255.255.0
 
-  # Enable fallback hotspot (captive portal) in case wifi connection fails
-  ap:
-    ssid: "Sprinkler Fallback Hotspot"
-    password: "xxx"
+# Enable fallback hotspot (captive portal) in case wifi connection fails
+#  ap:
+#    ssid: "xxx"
+#    password: "xxx"
+
+###############################################################
+#                       WEB MANAGEMENT                        #   
+###############################################################
+
 ota:
 web_server:
   port: 80
 
-captive_portal:
+#Captive portal not usefull in my application
+#captive_portal:
 
 
 ###############################################################
-#                      GESTIONE LOGGER                        #   
+#                     LOGGER MANAGEMENT                       #   
 ###############################################################
 
-# Enable logging
+# Logger configuration
 logger:
-#  level: ERROR
-#  logs:
-#    esp32_ble_tracker: WARN
-#    ADC: WARN
-#    SWITCH: WARN
-#    V_bat: WARN
-#    xiaomi_hhccjcy01: ERROR
+  level: DEBUG
+  logs:
+    esp32_ble_tracker: ERROR
+    adc: ERROR
+    SWITCH: DEBUG
+    xiaomi_hhccjcy01: ERROR
+    xiaomi_ble: ERROR
+    sensor: ERROR
 
 ###############################################################
 #                       HOME ASSISTANT                        #   
@@ -70,37 +90,48 @@ logger:
 
 # Enable Home Assistant API
 api:
-#Servizio che permette da home assistant tramite mqtt di definire la variabile sleep time (passata da home assistant)
-#Per usare questo servizio il device deve essere sveglio
+#This service will allow you to set the duration_of_irrigation variable via native API - the duration_of_irrigation variable will be used to define the irrigation time (remember the solenoid is a bistable one)
+#To use this service the device must be awake
    services:
-     - service: set_sleep_time
+#Service Start Irrigation
+     - service: start_irrigation
        variables:
-         sleep_time: float
+         duration_of_irrigation_service: int
        then:
         - lambda: |-
-             id(sleeptime).state = sleep_time;
+             id(irrigation_time).state = duration_of_irrigation_service;
 
-###############################################################
-#                 Configurazione MQTT                         #   
-###############################################################
+        - logger.log: 
+            format: "******CALLED SERVICE START_IRRIGATION******"
+            level: ERROR
+        - delay: 5s
+        - switch.toggle: watering_start
 
-mqtt:
-  broker: 192.168.1.20
-  port: 1883
-  username: xxx
-  password: xxx
-  on_message:
-    - topic: irrigatore/ota_mode #Previene il deep sleep in modo da poter effettuare l'ota
-      payload: 'ON'
-      then:
-        - deep_sleep.prevent: deep_sleep_23
-    - topic: irrigatore/sleep_mode #Invia il sistema in deep sleep   
-      payload: 'ON'
-      then:
-        - deep_sleep.enter: deep_sleep_23
+#Service Stop Irrigation
+     - service: stop_irrigation
+       variables:
+         long_deep_sleep_time_service: int
+       then:
+        - lambda: |-
+             id(long_deep_sleep_time).state = long_deep_sleep_time_service;
+        - logger.log: 
+            format: "******CALLED SERVICE STOP_IRRIGATION******"
+            level: ERROR
+        - delay: 5s
+        - switch.toggle: watering_stop
 
+#Service Battery health check
+     - service: battery_health_check_on
+       then:
+        - switch.turn_on: power_supply_battery_sensor
+     - service: battery_health_check_off
+       then:
+        - switch.turn_off: power_supply_battery_sensor
+
+
+            
 ###############################################################
-#              Configurazione Bluetooth                       #   
+#                Bluetooth configuration                      #   
 ###############################################################
 esp32_ble_tracker:
 
@@ -126,51 +157,63 @@ switch:
 #                                                                                                     #
 #######################################################################################################
 
+#############################################################################
+#                      SPRINKLER MANAGEMENT                                 #
+#note:                                                                      # 
+#To open the solenoid is enough one pulse (500ms) - negative voltage        #
+#To close the solenoide are needed more than one pulse - positive voltage   #
+#The solenoid is the one got from the acquauno device                       #
+#Variables:                                                                 #
+# irrigation_time --> from home assistant trough native API                 #
+# default_irrigation_time  --> Global variables used instead of             #
+# irrigation_time when it is nan                                            #
+#############################################################################
 ###############################################################
-#             GESTIONE COMANDI INIZIO IRRIGAZIONE             #   
+#                   IRRIGATION START MANAGEMENT               #   
 ###############################################################
-
 #switch:
   - platform: gpio
     pin: $pin_sprinkler_on
     id: switch1
   - platform: template
-    name: "inizia irrigazione"
+    name: "start watering"
     id: watering_start   
     icon: "mdi:sprinkler"
     turn_on_action:
-    - logger.log: "action Inizia irrigazione"
-    - switch.turn_on: switch1
-    - delay: 500ms #Durata impulso negativo per aprire l'elettrovalvola ed iniziare l'irrigazione
+    - logger.log: 
+        format: "Action: Watering begins"
+        level: ERROR
+    #Start irrigation
+    - switch.turn_on: switch1                #   _
+    - delay: 500ms #negative pulse duration  # _| |_  -7v
     - switch.turn_off: switch1
-
-    #Mando in deep sleep per tutta la durata dell'irrigazione
-    - logger.log:
-       format: "L'irrigazione durerà %.1f secondi "
-       args: [ id(sleeptime).state ]
-#      if(states('sensor.sleeptime') |char == nan)
-#
+    
+    #Lambda filter checks if the sleep time is "not a number" if it is, the sleep duration will be setted to a default value
     - lambda: |-  
-       if(isnan(id(sleeptime).state))  
+       if(isnan(id(irrigation_time).state))  
         {
-            ESP_LOGD("Mymodule", "********* Status Unkown sleep time 1 second ********");
-            id(deep_sleep_23).set_sleep_duration(1000);
-        }
-       else
-        {
-            ESP_LOGD("Mymodule", "********* ELSE ********");
-            id(deep_sleep_23).set_sleep_duration(id(sleeptime).state*1000);
-        }
-#    - deep_sleep.enter: deep_sleep_23
-          #  ESP_LOGD("Mymodule", "********* Status Unkown sleep time 1 second ********");
+            ESP_LOGE("Mymodule", "********* Error: Default irrigation time - The irrigation will last %.1f second  ********", id(default_irrigation_time)); 
+             id(deep_sleep_23).set_sleep_duration(id(default_irrigation_time)*1000);
 
-          # logger.log: "********* Status Unkown sleep time 1 second ********"
-          #          logger.log:
-          #            format: "ELSE L'irrigazione durerà %.1f secondi "
-          #            args: [ id(sleeptime).state ]
+         }
+        else
+         {
+             ESP_LOGE("Mymodule", "great! we are in the else branch!!!");
+             ESP_LOGE("Mymodule", "********* The irrigation will last %.1f second  ********", id(irrigation_time).state);
+             id(deep_sleep_23).set_sleep_duration(id(irrigation_time).state*1000);
+         }
+
+
+# Send the ESP32 in deep sleep for the duration of irrigation  
+    - logger.log:
+       format: "Going in deep sleep for the irrigation time" #---------- to be converted in minutes
+       level: ERROR
+    - delay: 3s #To erase, this delay is present to guarantee enough time to print previous messages prior to go in deep sleep
+    - deep_sleep.enter:
+        id: deep_sleep_23
         
 ###############################################################
-#               GESTIONE COMANDI FINE IRRIGAZIONE             #   
+#                   IRRIGATION ENDS MANAGEMENT                #   
 ###############################################################
 
   - platform: gpio
@@ -181,45 +224,62 @@ switch:
     id: watering_stop
     icon: "mdi:flower-outline"
     turn_on_action:
-    - logger.log: "action stop irrigazione"
-#    - switch.turn_on: switch2
-#    - delay: 500ms
-#    - switch.turn_off: switch2
-#    - delay: 500ms
-#    - switch.turn_on: switch2
-#    - delay: 500ms
-#    - switch.turn_off: switch2 #Da questo impulso in poi probabilmente non serve dare altri impulsi per chiudere la valvola.
-#    - delay: 500ms
-#    - switch.turn_on: switch2
-#    - delay: 500ms
-#    - switch.turn_off: switch2
-#    - delay: 500ms
     - logger.log:
-         format: "entro in deep sleep per %.1f secondi "
-         args: [ id(sleeptime).state ]
+       format: "Action:Irrigation ends" 
+       level: ERROR
+    
+    #First pulse
+    - switch.turn_on: switch2
+    - delay: 500ms
+    - switch.turn_off: switch2
+    - delay: 500ms
+    #Second puls
+    - switch.turn_on: switch2
+    - delay: 500ms
+    - switch.turn_off: switch2
+    - delay: 500ms
+    #Third pulse
+    - switch.turn_on: switch2
+    - delay: 500ms
+    - switch.turn_off: switch2
+#                                                                      _    _     _
+#three positive pulse to close the solenoid - duration 500 ms x 3  # _| |__| |_ _| |_   +7v
 
-# #********************************#
+    - logger.log:
+         format: "The sprinkler is going to sleep till to nex irrigation - WATERING STOP - DEBUG 60 seconds" 
+         level: ERROR
+    - lambda: |-
+          id(deep_sleep_23).set_sleep_duration(id(long_deep_sleep_time).state*1000);
+    - deep_sleep.enter:
+        id: deep_sleep_23
+#        sleep_duration: 60sec
+
+###############################################################
+#             MANAGEMENT OF ACQUISITION SWITCHES             #   
+###############################################################
 
 #Switch controllo sensori
-#  - platform: gpio
-#    pin: GPIO15
-#    id: power_moisture_sensor
-#    name: "Moisture sensor"
-#    icon: "mdi:toggle-switch"
+  - platform: gpio
+    pin: $moisture_acquisition_switch
+    id: power_moisture_sensor
+    name: "Moisture sensor"
+    icon: "mdi:toggle-switch"
 #Switch controllo sensori
-#  - platform: gpio
-#    pin: $battery_acquisition_switch
-#    id: power_supply_battery_sensor
-#    name: "supply battery sensor"
-#    icon: "mdi:toggle-switch"
+  - platform: gpio
+    pin: $battery_acquisition_switch
+    id: power_supply_battery_sensor
+    name: "supply battery sensor"
+    icon: "mdi:toggle-switch"
+
+
 
 
 ###############################################################
-#               GESTIONE MANUALE DELL'IRRIGAZIONE             #   
+#                  MANUAL IRRIGATION MANAGEMENT               #   
 ###############################################################
 
 binary_sensor:
-#tasto verde inizio irrigazione
+#Green button watering start
   - platform: gpio
     pin:
       number: $green_button
@@ -232,7 +292,7 @@ binary_sensor:
       - switch.toggle: watering_start
       - logger.log: "button start sprinkler pressed"
 
-#tasto rosso inizio irrigazione      
+#Red button watering stop    
   - platform: gpio
     pin:
       number: $red_button
@@ -243,55 +303,89 @@ binary_sensor:
     name: "button stop sprinkler"
     on_press:
       - switch.toggle: watering_stop
-      - logger.log: "button stop sprinkler pressed"
+      - logger.log: "button stop sprrinkler pressed"#
+      
+#Status sensor
+
+  - platform: status
+    name: "Sprinkler Alive"
+
 
 #################################################
 #                 SENSOR                        #                 
 #################################################
 sensor:
+#Custom component
+#  - platform: heapmon
+#    id: heapspace
+#    name: "Free Space"
+    
   - platform: homeassistant
-    name: "sleeptime"
-    entity_id: sensor.sleeptime 
-    id: sleeptime
-#ADC
-#Acquisizione tensione batterie
-#  - platform: adc
-#    pin: $battery_acquisition
-#    name: "Voltage supply battery"
-#    id: V_bat
-#    attenuation: 11db
-#    update_interval: 5s
-#    filters:
-#      - calibrate_linear:
-#          - 0.0 -> 0.0
-#          - 3.6 -> 3.04
-#      - median:
-#          window_size: 7
-#          send_every: 4
-#          send_first_at: 3
-#    icon: "mdi:battery-medium"
+    name: "irrigation time"
+    entity_id: sensor.irrigation_time 
+    id: irrigation_time
+  - platform: homeassistant
+    name: "long deep sleep time"
+    entity_id: sensor.long_deep_sleep_time 
+    id: long_deep_sleep_time
 
-#Acquisizione Sensore pianta capacitivo
-#  - platform: adc
-#    pin: GPIO34
-#    attenuation: 11db
-#    filters:
-#      - lambda: |-
-#          if (x > 2.84) {
-#            return 0;
-#          } else if (x < 1.67) {
-#            return 100;
-#          } else {
-#            return (2.84-x) / (2.84-1.67) * 100.0;
-#          }
-#      - median:
-#          window_size: 7
-#          send_every: 4
-#          send_first_at: 3          
-#    name: "Soil Moisture Level"
-#    update_interval: 1s
-#    icon: "mdi:water-percent"
-#    unit_of_measurement: "%"
+
+    
+#################################################
+#           ADC ACQUISITION MANAGEMENT          #                 
+#################################################
+#Acquisition of battery voltage - needed to check the residual charge
+  - platform: adc
+    pin: $battery_acquisition
+    name: "Voltage supply battery"
+    id: v_bat
+    attenuation: 11db
+    update_interval: 1s
+    filters:
+      - calibrate_linear:
+          - 0.0 -> 0.0
+          - 2.49 -> 2.74
+          - 2.99 -> 2.68
+          - 3.04 -> 2.71
+          - 3.08 -> 2.74
+          - 3.85 -> 3.14
+      - median:
+          window_size: 3
+          send_every: 4
+          send_first_at: 3
+      - lambda: !lambda |-
+          if ( x > 2 ) {
+            return x;
+          } else {
+            return 0;
+          }
+
+
+
+#Acquisition of capacitive moisture sensor
+  - platform: adc
+    pin: GPIO34
+    attenuation: 11db
+##The goal of this filter is convert the measured value in a percentage value were 
+## x is the value got from the ADC during the operation, 2.84 is the value got from the ADC when the sensor is immersed in water (full wet) and 1.67 is the value got from the ADC when the sensor in full dry 
+ 
+    filters:
+      - lambda: |-
+          if (x > 2.84) {
+            return 0;
+          } else if (x < 1.67) {
+            return 100;
+          } else {
+            return (2.84-x) / (2.84-1.67) * 100.0;
+          }
+      - median:
+          window_size: 7
+          send_every: 4
+          send_first_at: 3          
+    name: "Soil Moisture Level"
+    update_interval: 1s
+    icon: "mdi:water-percent"
+    unit_of_measurement: "%"
     
 #Gateway Plant sensors Xiaomi
   - platform: xiaomi_hhccjcy01
@@ -305,11 +399,11 @@ sensor:
     conductivity:
       name: "Conduttività camelia"
 
-#Potenza del WIFI
-  - platform: wifi_signal
-    name: sprinkler wifi signal power
-    id: wifi_signal_db
-    update_interval: 60s
+#Wi-Fi signal strength
+#  - platform: wifi_signal
+#    name: sprinkler wifi signal power
+#    id: wifi_signal_db
+#    update_interval: 60s
     # on_raw_value:
       # then:
         # - text_sensor.template.publish:
@@ -323,58 +417,61 @@ sensor:
     
 
 #Uptime sensor
-  - platform: uptime
-    name: Uptime Sensor
-    id: uptime_sensor
-    update_interval: 10s
-    on_raw_value:
-      then:
-        - text_sensor.template.publish:
-            id: uptime_human
-            state: !lambda |-
-              int seconds = round(id(uptime_sensor).raw_state);
-              int days = seconds / (24 * 3600);
-              seconds = seconds % (24 * 3600);
-              int hours = seconds / 3600;
-              seconds = seconds % 3600;
-              int minutes = seconds /  60;
-              seconds = seconds % 60;
-              return (
-               (days ? String(days) + "d " : "") +
-                (hours ? String(hours) + "h " : "") +
-                (minutes ? String(minutes) + "m " : "") +
-                (String(seconds) + "s")
-              ).c_str();
+#This sensor is useful during the development to check immediately if something strange happened but will be removed in the final firmware
+#  - platform: uptime
+#    name: Uptime Sensor
+#    id: uptime_sensor
+#    update_interval: 10s
+#    on_raw_value:
+#      then:
+#        - text_sensor.template.publish:
+#            id: uptime_human
+#            state: !lambda |-
+#              int seconds = round(id(uptime_sensor).raw_state);
+#              int days = seconds / (24 * 3600);
+#              seconds = seconds % (24 * 3600);
+#              int hours = seconds / 3600;
+#              seconds = seconds % 3600;
+#              int minutes = seconds /  60;
+#              seconds = seconds % 60;
+#              return (
+#               (days ? String(days) + "d " : "") +
+#                (hours ? String(hours) + "h " : "") +
+#                (minutes ? String(minutes) + "m " : "") +
+#                (String(seconds) + "s")
+#              ).c_str();
               
-  - platform: template
-    name: status
-    update_interval: 10s
-    id: status
-    lambda: !lambda |-
-            if(id(uptime_sensor).state >15){  
-              return 1;
-            }
-            else
-            {  
-              return 0;
-            }
+              
+#This sensor is used during the development
+#The status change from 1 to 0 is intercepted by an automation in "home assistant" who send me a message via telegram to inform that the board had a reset  
+#  - platform: template
+#    name: status
+#    update_interval: 10s
+#    id: status
+#    lambda: !lambda |-
+#            if(id(uptime_sensor).state >15){  
+#              return 1;
+#            }
+#            else
+#            {  
+#              return 0;
+#            }
     
-# Example configuration entry
-text_sensor:
-  - platform: template
-    name: Uptime Human Readable
-    id: uptime_human
-    icon: mdi:clock-start
+# makes more easy to read the uptime sensor - example from ESPHOME web site
+#text_sensor:
+#  - platform: template
+#    name: Uptime Human Readable
+#    id: uptime_human
+#    icon: mdi:clock-start
 
-  # - platform: template
-    # name: Wifi signal level (%)
-    # id: wifi_signal_power_percentage
-    # icon: mdi:Wifi
+#  - platform: template
+#    name: Wifi signal level (%)
+#    id: wifi_signal_power_percentage
+#    icon: mdi:Wifi
 
-# Deep Sleep. da settare correttamente
+# Deep Sleep Feature. 
 deep_sleep:
-  run_duration: 120min
-  sleep_duration: 1min
+  run_duration: $default_run_duration
+  sleep_duration: $default_deep_sleep_duration
   id: deep_sleep_23
-
 
